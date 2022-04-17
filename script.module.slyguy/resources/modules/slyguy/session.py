@@ -8,6 +8,7 @@ from six import BytesIO
 from kodi_six import xbmc
 
 from . import userdata, settings
+from .util import get_kodi_proxy
 from .dns import get_dns_rewrites
 from .log import log
 from .language import _
@@ -29,15 +30,23 @@ orig_getaddrinfo = socket.getaddrinfo
 class RawSession(requests.Session):
     def __init__(self, verify=None, timeout=None):
         super(RawSession, self).__init__()
-        self._timeout = settings.common_settings.getInt('http_timeout', 30) if timeout is None else timeout
-        self._verify = settings.common_settings.getBool('verify_ssl', True) if verify is None else verify
+        self._verify = verify
+        self._timeout = timeout
         self._dns_rewrites = []
         self._rewrite_cache = {}
+        self._proxy = None
         socket.getaddrinfo = lambda *args, **kwargs: self._getaddrinfoPreferIPv4(*args, **kwargs)
 
     def set_dns_rewrites(self, rewrites):
         self._dns_rewrites = rewrites
         self._rewrite_cache = {}
+
+    def set_proxy(self, proxy):
+        proxy = proxy or ''
+        if proxy.lower().strip() == 'kodi':
+            proxy = get_kodi_proxy()
+        log.debug('proxy set to: {}'.format(proxy))
+        self._proxy = proxy
 
     def _getaddrinfoPreferIPv4(self, host, port, family=0, _type=0, proto=0, flags=0):
         if host in self._rewrite_cache:
@@ -60,13 +69,23 @@ class RawSession(requests.Session):
     def request(self, method, url, **kwargs):
         if 'verify' not in kwargs:
             kwargs['verify'] = self._verify
+
         if 'timeout' not in kwargs:
             kwargs['timeout'] = self._timeout
+
+        if 'proxies' not in kwargs and self._proxy:
+            kwargs['proxies'] = {
+                "http": self._proxy,
+                "https": self._proxy,
+            }
+            log.debug('Using proxy: {}'.format(self._proxy))
+
         return super(RawSession, self).request(method, url, **kwargs)
 
 class Session(RawSession):
     def __init__(self, headers=None, cookies_key=None, base_url='{}', timeout=None, attempts=None, verify=None, dns_rewrites=None):
-        super(Session, self).__init__(verify, timeout)
+        super(Session, self).__init__(verify=settings.common_settings.getBool('verify_ssl', True) if verify is None else verify,
+            timeout=settings.common_settings.getInt('http_timeout', 30) if timeout is None else timeout)
 
         self._headers = headers or {}
         self._cookies_key = cookies_key
@@ -76,6 +95,7 @@ class Session(RawSession):
         self.after_request = None
 
         self.set_dns_rewrites(get_dns_rewrites() if dns_rewrites is None else dns_rewrites)
+        self.set_proxy(settings.get('proxy_server') or settings.common_settings.get('proxy_server'))
 
         self.headers.update(DEFAULT_HEADERS)
         self.headers.update(self._headers)
